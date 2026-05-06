@@ -1,0 +1,21 @@
+import_compilers({
+    python: "python",
+    javascript: "node",
+    c: "gcc",
+    cpp: "g++"
+})
+
+func main() {
+    print("Hello from Python")
+
+    x = sqrt(25)
+    print("Python sqrt(25) =", x)
+
+    console.log("Hello from JS")
+
+    compiler_run("c") {
+        printf("Hello from C\n");
+    }
+}
+
+main()

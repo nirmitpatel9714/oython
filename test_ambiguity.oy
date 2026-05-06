@@ -1,0 +1,12 @@
+import_compilers({
+    python: "python",
+    javascript: "node",
+    c: "gcc",
+    cpp: "g++"
+})
+
+func main() {
+    printf("This should fail because printf is in C and C++")
+}
+
+main()
