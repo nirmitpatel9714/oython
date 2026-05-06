@@ -44,7 +44,7 @@ main()
 ### Running Oython
 
 ```bash
-python oython.py program.oy
+oython program.oy
 ```
 
 *Note: Since JavaScript is routed through Node.js, ensure `node` is available in your PATH or configured accurately in `import_compilers`.*
