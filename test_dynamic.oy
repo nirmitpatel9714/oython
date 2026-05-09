@@ -1,0 +1,17 @@
+import_compilers({
+    python: "python",
+    javascript: "node"
+})
+
+func main() {
+    print("Testing dynamic detection...")
+    
+    # Test python package
+    v = math.sqrt(25)
+    print("math.sqrt =", v)
+    
+    # Test JS module (assuming 'fs' is a node module, we can use it to test)
+    console.log("Hello from JS dynamically detected module")
+}
+
+main()

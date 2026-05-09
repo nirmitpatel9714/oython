@@ -6,14 +6,6 @@ import subprocess
 import os
 import shutil
 
-COMPILER_FUNCTIONS = {
-    "python": ["print", "math.sqrt", "sqrt", "len", "str", "int", "math.pow"],
-    "javascript": ["console.log", "Math.sqrt", "parseInt", "parseFloat"],
-    "c": ["printf", "scanf", "malloc", "free", "sqrt"],
-    "cpp": ["printf", "cout", "cin", "sqrt", "std::cout"],
-    "java": ["System.out.println", "System.out.print", "Math.sqrt"]
-}
-
 DEFAULT_COMPILER_ORDER = ["python", "javascript", "java", "cpp", "c"]
 
 class AmbiguityError(Exception): pass
@@ -26,15 +18,106 @@ def get_compiler_path(lang):
         return _compilers[lang]
     return lang
 
+def _check_python(func_name):
+    parts = func_name.split('.')
+    if len(parts) > 1:
+        mod_name = parts[0]
+        try:
+            mod = __import__(mod_name)
+            curr = mod
+            for part in parts[1:]:
+                curr = getattr(curr, part)
+            return True
+        except (ImportError, AttributeError):
+            return False
+    else:
+        try:
+            eval(func_name, {"__builtins__": __builtins__})
+            return True
+        except NameError:
+            return False
+
+def _check_javascript(path, func_name):
+    parts = func_name.split('.')
+    if len(parts) > 1:
+        mod_name = parts[0]
+        attr = parts[1]
+        script = f"""
+        try {{
+            const mod = require('{mod_name}');
+            if (typeof mod.{attr} !== 'undefined') process.exit(0);
+            process.exit(1);
+        }} catch(e) {{
+            process.exit(1);
+        }}
+        """
+    else:
+        script = f"""
+        try {{
+            if (typeof {func_name} !== 'undefined') process.exit(0);
+            process.exit(1);
+        }} catch(e) {{
+            process.exit(1);
+        }}
+        """
+    with open(".oython_check.js", "w") as f:
+        f.write(script)
+    res = subprocess.run([path, ".oython_check.js"], capture_output=True)
+    return res.returncode == 0
+
+def _check_c_cpp(path, lang, func_name):
+    headers = ["<stdio.h>", "<stdlib.h>", "<math.h>", "<string.h>"] if lang == "c" else ["<iostream>", "<cmath>", "<string>", "<vector>"]
+    inc = "\n".join(f"#include {h}" for h in headers)
+    code = f"""
+    {inc}
+    int main() {{
+        void *p = (void*)&{func_name};
+        return 0;
+    }}
+    """
+    ext = "c" if lang == "c" else "cpp"
+    filename = f".oython_check.{ext}"
+    outname = f".oython_check_out.exe" if os.name == 'nt' else f".oython_check_out"
+    with open(filename, "w") as f:
+        f.write(code)
+    res = subprocess.run([path, "-c", filename, "-o", outname], capture_output=True)
+    return res.returncode == 0
+
+def check_function(compiler, func_name):
+    comp_lower = compiler.lower()
+    path = get_compiler_path(compiler)
+    
+    # Generic support for any compiler: check if user provided a custom check script
+    plugin_script = f".oython_{comp_lower}_check.py"
+    if os.path.exists(plugin_script):
+        res = subprocess.run(["python", plugin_script, func_name], capture_output=True)
+        return res.returncode == 0
+
+    if comp_lower == "python" or "python" in path:
+        return _check_python(func_name)
+    elif comp_lower in ["javascript", "node", "js"] or "node" in path:
+        return _check_javascript(path, func_name)
+    elif comp_lower in ["c", "gcc", "clang"]:
+        return _check_c_cpp(path, "c", func_name)
+    elif comp_lower in ["cpp", "g++", "clang++", "c++"]:
+        return _check_c_cpp(path, "cpp", func_name)
+    elif comp_lower in ["java", "javac"]:
+        if func_name in ["System.out.println", "System.out.print", "Math.sqrt"]: return True
+        return False
+    else:
+        return False
+
 def resolve_function(func_name, default_compiler, imported_compilers):
-    # Check if clearly in default compiler
-    if default_compiler in COMPILER_FUNCTIONS and func_name in COMPILER_FUNCTIONS[default_compiler]:
+    if func_name in ["__oython_exec__", "__oython_run_block__"]:
+        return default_compiler
+
+    if check_function(default_compiler, func_name):
         return default_compiler
         
     found_in = []
     for comp in imported_compilers:
         if comp == default_compiler: continue
-        if comp in COMPILER_FUNCTIONS and func_name in COMPILER_FUNCTIONS[comp]:
+        if check_function(comp, func_name):
             found_in.append(comp)
             
     if len(found_in) == 1:
@@ -42,20 +125,32 @@ def resolve_function(func_name, default_compiler, imported_compilers):
     elif len(found_in) > 1:
         raise AmbiguityError(f"Function '{func_name}' is ambiguous. Found in: {', '.join(found_in)}. Please use compiler_run.")
     else:
-        # Default fallback
         return default_compiler
 
 def __oython_exec__(compiler, func_name, *args):
     path = get_compiler_path(compiler)
-    if compiler == "javascript":
+    if compiler in ["javascript", "node", "js"] or "node" in path:
         args_js = ", ".join(json.dumps(a) for a in args)
-        script = f"""
-        const fs = require('fs');
-        const res = {func_name}({args_js});
-        if (res !== undefined) {{
-            fs.writeFileSync('.oython_out.json', JSON.stringify({{result: res}}));
-        }}
-        """
+        parts = func_name.split('.')
+        if len(parts) > 1:
+            mod_name = parts[0]
+            attr = parts[1]
+            script = f"""
+            const fs = require('fs');
+            const mod = require('{mod_name}');
+            const res = mod.{attr}({args_js});
+            if (res !== undefined) {{
+                fs.writeFileSync('.oython_out.json', JSON.stringify({{result: res}}));
+            }}
+            """
+        else:
+            script = f"""
+            const fs = require('fs');
+            const res = {func_name}({args_js});
+            if (res !== undefined) {{
+                fs.writeFileSync('.oython_out.json', JSON.stringify({{result: res}}));
+            }}
+            """
         if os.path.exists(".oython_out.json"):
             os.remove(".oython_out.json")
         with open(".oython_temp.js", "w") as f:
@@ -74,7 +169,14 @@ def __oython_exec__(compiler, func_name, *args):
 
 def __oython_run_block__(compiler, code):
     path = get_compiler_path(compiler)
-    if compiler == "c":
+    comp_lower = compiler.lower()
+    
+    plugin_script = f".oython_{comp_lower}_run.py"
+    if os.path.exists(plugin_script):
+        subprocess.run(["python", plugin_script, code], check=True)
+        return
+
+    if comp_lower in ["c", "gcc", "clang"]:
         c_code = f"""
         #include <stdio.h>
         #include <stdlib.h>
@@ -87,8 +189,8 @@ def __oython_run_block__(compiler, code):
         with open(".oython_temp.c", "w") as f:
             f.write(c_code)
         subprocess.run([path, ".oython_temp.c", "-o", ".oython_temp_c.exe"], check=True)
-        subprocess.run([".\\.oython_temp_c.exe"], check=True)
-    elif compiler == "cpp":
+        subprocess.run([".\\.oython_temp_c.exe" if os.name == 'nt' else "./.oython_temp_c.exe"], check=True)
+    elif comp_lower in ["cpp", "g++", "clang++", "c++"]:
         cpp_code = f"""
         #include <iostream>
         #include <cmath>
@@ -101,7 +203,7 @@ def __oython_run_block__(compiler, code):
         with open(".oython_temp.cpp", "w") as f:
             f.write(cpp_code)
         subprocess.run([path, ".oython_temp.cpp", "-o", ".oython_temp_cpp.exe"], check=True)
-        subprocess.run([".\\.oython_temp_cpp.exe"], check=True)
+        subprocess.run([".\\.oython_temp_cpp.exe" if os.name == 'nt' else "./.oython_temp_cpp.exe"], check=True)
     else:
         print(f"[Oython Prototype] Unsupported compiler_run block for {compiler}")
 
@@ -110,6 +212,7 @@ class OythonTransformer(ast.NodeTransformer):
         self.local_funcs = local_funcs
         self.default_compiler = default_compiler
         self.imported_compilers = imported_compilers
+        self.python_modules = set()
 
     def visit_Call(self, node):
         self.generic_visit(node)
@@ -124,14 +227,16 @@ class OythonTransformer(ast.NodeTransformer):
         if not func_name:
             return node
             
-        if func_name in self.local_funcs or func_name == "__oython_run_block__" or func_name == "__oython_exec__":
+        if func_name in self.local_funcs or func_name in ["__oython_run_block__", "__oython_exec__"]:
             return node
             
         compiler = resolve_function(func_name, self.default_compiler, self.imported_compilers)
         
-        if compiler == "python":
-            if func_name == "sqrt":
-                node.func = ast.parse("math.sqrt", mode='eval').body
+        comp_lower = compiler.lower()
+        if comp_lower == "python" or "python" in get_compiler_path(compiler):
+            parts = func_name.split('.')
+            if len(parts) > 1:
+                self.python_modules.add(parts[0])
             return node
         else:
             new_node = ast.Call(
@@ -223,18 +328,20 @@ def run(filepath):
     new_tree = transformer.visit(tree)
     ast.fix_missing_locations(new_tree)
     
-    import_math = ast.parse("import math").body[0]
-    new_tree.body.insert(0, import_math)
-    
     compiled_code = compile(new_tree, filename="<ast>", mode="exec")
     
     exec_globals = {
         "__builtins__": __builtins__,
         "__oython_exec__": __oython_exec__,
-        "__oython_run_block__": __oython_run_block__,
-        "math": __import__("math")
+        "__oython_run_block__": __oython_run_block__
     }
     
+    for mod in transformer.python_modules:
+        try:
+            exec_globals[mod] = __import__(mod)
+        except ImportError:
+            pass
+            
     exec(compiled_code, exec_globals)
 
 if __name__ == "__main__":
